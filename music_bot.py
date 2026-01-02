@@ -7,6 +7,9 @@ import os
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import re
+import random
+import signal
+import sys
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -47,6 +50,7 @@ FFMPEG_OPTIONS = {
 }
 
 queues = {}
+is_shutting_down = False
 
 class MusicBot(commands.Cog):
     def __init__(self, bot):
@@ -230,6 +234,14 @@ class MusicBot(commands.Cog):
             return False
 
     async def play_next(self, ctx):
+        global is_shutting_down
+        
+        if is_shutting_down:
+            return
+            
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            return
+            
         if ctx.guild.id in queues and len(queues[ctx.guild.id]) > 0:
             try:
                 song = queues[ctx.guild.id].pop(0)
@@ -239,15 +251,35 @@ class MusicBot(commands.Cog):
                 def after_playing(error):
                     if error:
                         print(f"Player error: {error}")
-                    asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+                    if not is_shutting_down:
+                        asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
                 
                 ctx.voice_client.play(player, after=after_playing)
                 
                 await ctx.send(f'Now playing: **{song["title"]}**')
             except Exception as e:
                 print(f"Error in play_next: {e}")
-                await ctx.send(f"Error playing song: {str(e)}")
-                await self.play_next(ctx)
+                if not is_shutting_down:
+                    await self.play_next(ctx)
+
+    @commands.command(name='shuffle', help='Shuffles the current queue')
+    async def shuffle_queue(self, ctx):
+        if ctx.guild.id not in queues or len(queues[ctx.guild.id]) == 0:
+            await ctx.send("Queue is empty! Nothing to shuffle.")
+            return
+        
+        random.shuffle(queues[ctx.guild.id])
+        await ctx.send(f"🔀 Shuffled **{len(queues[ctx.guild.id])}** songs in the queue!")
+
+    @commands.command(name='clear', help='Clears the entire queue')
+    async def clear_queue(self, ctx):
+        if ctx.guild.id not in queues or len(queues[ctx.guild.id]) == 0:
+            await ctx.send("Queue is already empty!")
+            return
+        
+        count = len(queues[ctx.guild.id])
+        queues[ctx.guild.id].clear()
+        await ctx.send(f"🗑️ Cleared **{count}** songs from the queue!")
 
     @commands.command(name='skip', help='Skips the current song')
     async def skip(self, ctx):
@@ -310,6 +342,8 @@ class MusicBot(commands.Cog):
         embed.add_field(name="!pause", value="Pause the current song", inline=False)
         embed.add_field(name="!resume", value="Resume playback", inline=False)
         embed.add_field(name="!skip", value="Skip to the next song", inline=False)
+        embed.add_field(name="!shuffle", value="Shuffle the current queue", inline=False)
+        embed.add_field(name="!clear", value="Clear the entire queue", inline=False)
         embed.add_field(name="!queue", value="Show the current queue", inline=False)
         embed.add_field(name="!stop", value="Stop playing and clear queue", inline=False)
         embed.add_field(name="!leave", value="Disconnect from voice channel", inline=False)
@@ -336,4 +370,32 @@ async def on_voice_state_update(member, before, after):
                 if member.guild.id in queues:
                     queues[member.guild.id].clear()
 
-bot.run(TOKEN)
+async def shutdown():
+    global is_shutting_down
+    is_shutting_down = True
+    print("\nShutting down gracefully...")
+    
+    for guild_id in list(queues.keys()):
+        queues[guild_id].clear()
+    
+    for voice_client in bot.voice_clients:
+        try:
+            if voice_client.is_playing():
+                voice_client.stop()
+            await voice_client.disconnect()
+        except:
+            pass
+    
+    await bot.close()
+
+def signal_handler(sig, frame):
+    print('\nReceived shutdown signal...')
+    asyncio.create_task(shutdown())
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    try:
+        bot.run(TOKEN)
+    except KeyboardInterrupt:
+        print("\nBot stopped.")
