@@ -65,14 +65,15 @@ class MusicBot(commands.Cog):
                 tracks = []
                 for item in playlist['tracks']['items']:
                     track = item['track']
-                    if track:
+                    if track and track.get('name') and track.get('artists'):
                         tracks.append(f"{track['artists'][0]['name']} {track['name']}")
                 return tracks
             elif 'album' in url:
                 album = sp.album(url)
                 tracks = []
                 for track in album['tracks']['items']:
-                    tracks.append(f"{track['artists'][0]['name']} {track['name']}")
+                    if track.get('name') and track.get('artists'):
+                        tracks.append(f"{track['artists'][0]['name']} {track['name']}")
                 return tracks
         except Exception as e:
             print(f"Spotify error: {e}")
@@ -104,13 +105,23 @@ class MusicBot(commands.Cog):
                         return
                     
                     if len(spotify_tracks) > 1:
-                        await ctx.send(f"Adding **{len(spotify_tracks)}** songs from Spotify to queue...")
+                        await ctx.send(f"Adding **{len(spotify_tracks)}** songs from Spotify to queue... This may take a moment.")
+                    
+                    added_count = 0
+                    failed_count = 0
                     
                     for track_search in spotify_tracks:
-                        await self.add_to_queue(ctx, track_search, voice_client)
+                        success = await self.add_to_queue(ctx, track_search, voice_client, silent=True)
+                        if success:
+                            added_count += 1
+                        else:
+                            failed_count += 1
                     
                     if len(spotify_tracks) > 1:
-                        await ctx.send(f"✅ Added **{len(spotify_tracks)}** songs to queue!")
+                        result_msg = f"✅ Added **{added_count}** songs to queue!"
+                        if failed_count > 0:
+                            result_msg += f" ({failed_count} songs couldn't be found)"
+                        await ctx.send(result_msg)
                 else:
                     await self.add_to_queue(ctx, search, voice_client)
                         
@@ -118,26 +129,46 @@ class MusicBot(commands.Cog):
                 await ctx.send(f"An error occurred: {str(e)}")
                 print(f"Error in play command: {e}")
 
-    async def add_to_queue(self, ctx, search, voice_client):
-        loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch:{search}", download=False))
-            if 'entries' in info:
+    async def add_to_queue(self, ctx, search, voice_client, silent=False):
+        try:
+            loop = asyncio.get_event_loop()
+            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+                info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch:{search}", download=False))
+                
+                if not info or 'entries' not in info or len(info['entries']) == 0:
+                    if not silent:
+                        await ctx.send(f"Couldn't find: **{search}**")
+                    print(f"No results found for: {search}")
+                    return False
+                
                 info = info['entries'][0]
-            
-            url = info['url']
-            title = info['title']
-            
-            if ctx.guild.id not in queues:
-                queues[ctx.guild.id] = []
-            
-            queues[ctx.guild.id].append({'url': url, 'title': title, 'ctx': ctx})
-            
-            if not voice_client.is_playing():
-                await self.play_next(ctx)
-            else:
-                if not self.is_spotify_url(search):
-                    await ctx.send(f'Added to queue: **{title}**')
+                
+                if not info:
+                    if not silent:
+                        await ctx.send(f"Couldn't find: **{search}**")
+                    return False
+                
+                url = info['url']
+                title = info['title']
+                
+                if ctx.guild.id not in queues:
+                    queues[ctx.guild.id] = []
+                
+                queues[ctx.guild.id].append({'url': url, 'title': title, 'ctx': ctx})
+                
+                if not voice_client.is_playing():
+                    await self.play_next(ctx)
+                else:
+                    if not silent:
+                        await ctx.send(f'Added to queue: **{title}**')
+                
+                return True
+                
+        except Exception as e:
+            print(f"Error adding to queue: {e} - Search: {search}")
+            if not silent:
+                await ctx.send(f"Error adding song: {search}")
+            return False
 
     async def play_next(self, ctx):
         if ctx.guild.id in queues and len(queues[ctx.guild.id]) > 0:
@@ -201,8 +232,13 @@ class MusicBot(commands.Cog):
             return
         
         queue_list = "\n".join([f"{i+1}. {song['title']}" 
-                               for i, song in enumerate(queues[ctx.guild.id])])
-        await ctx.send(f"**Current Queue:**\n{queue_list}")
+                               for i, song in enumerate(queues[ctx.guild.id][:10])])
+        
+        total = len(queues[ctx.guild.id])
+        if total > 10:
+            queue_list += f"\n... and {total - 10} more songs"
+        
+        await ctx.send(f"**Current Queue ({total} songs):**\n{queue_list}")
 
     @commands.command(name='help', help='Shows all available commands')
     async def help_command(self, ctx):
