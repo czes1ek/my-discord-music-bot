@@ -4,14 +4,24 @@ import yt_dlp
 import asyncio
 from dotenv import load_dotenv
 import os
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import re
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET
+))
 
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -37,7 +47,38 @@ class MusicBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name='play', help='Plays a song from YouTube')
+    def is_spotify_url(self, url):
+        spotify_patterns = [
+            r'https://open\.spotify\.com/track/',
+            r'https://open\.spotify\.com/playlist/',
+            r'https://open\.spotify\.com/album/'
+        ]
+        return any(re.match(pattern, url) for pattern in spotify_patterns)
+
+    async def get_spotify_track(self, url):
+        try:
+            if 'track' in url:
+                track = sp.track(url)
+                return [f"{track['artists'][0]['name']} {track['name']}"]
+            elif 'playlist' in url:
+                playlist = sp.playlist(url)
+                tracks = []
+                for item in playlist['tracks']['items']:
+                    track = item['track']
+                    if track:
+                        tracks.append(f"{track['artists'][0]['name']} {track['name']}")
+                return tracks
+            elif 'album' in url:
+                album = sp.album(url)
+                tracks = []
+                for track in album['tracks']['items']:
+                    tracks.append(f"{track['artists'][0]['name']} {track['name']}")
+                return tracks
+        except Exception as e:
+            print(f"Spotify error: {e}")
+            return None
+
+    @commands.command(name='play', help='Plays a song from YouTube or Spotify')
     async def play(self, ctx, *, search):
         if not ctx.author.voice:
             await ctx.send("You need to be in a voice channel to play music!")
@@ -54,28 +95,49 @@ class MusicBot(commands.Cog):
 
         async with ctx.typing():
             try:
-                loop = asyncio.get_event_loop()
-                with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch:{search}", download=False))
-                    if 'entries' in info:
-                        info = info['entries'][0]
+                if self.is_spotify_url(search):
+                    await ctx.send("🎵 Fetching from Spotify...")
+                    spotify_tracks = await self.get_spotify_track(search)
                     
-                    url = info['url']
-                    title = info['title']
+                    if not spotify_tracks:
+                        await ctx.send("Couldn't fetch from Spotify!")
+                        return
                     
-                    if ctx.guild.id not in queues:
-                        queues[ctx.guild.id] = []
+                    if len(spotify_tracks) > 1:
+                        await ctx.send(f"Adding **{len(spotify_tracks)}** songs from Spotify to queue...")
                     
-                    queues[ctx.guild.id].append({'url': url, 'title': title, 'ctx': ctx})
+                    for track_search in spotify_tracks:
+                        await self.add_to_queue(ctx, track_search, voice_client)
                     
-                    if not voice_client.is_playing():
-                        await self.play_next(ctx)
-                    else:
-                        await ctx.send(f'Added to queue: **{title}**')
+                    if len(spotify_tracks) > 1:
+                        await ctx.send(f"✅ Added **{len(spotify_tracks)}** songs to queue!")
+                else:
+                    await self.add_to_queue(ctx, search, voice_client)
                         
             except Exception as e:
                 await ctx.send(f"An error occurred: {str(e)}")
                 print(f"Error in play command: {e}")
+
+    async def add_to_queue(self, ctx, search, voice_client):
+        loop = asyncio.get_event_loop()
+        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch:{search}", download=False))
+            if 'entries' in info:
+                info = info['entries'][0]
+            
+            url = info['url']
+            title = info['title']
+            
+            if ctx.guild.id not in queues:
+                queues[ctx.guild.id] = []
+            
+            queues[ctx.guild.id].append({'url': url, 'title': title, 'ctx': ctx})
+            
+            if not voice_client.is_playing():
+                await self.play_next(ctx)
+            else:
+                if not self.is_spotify_url(search):
+                    await ctx.send(f'Added to queue: **{title}**')
 
     async def play_next(self, ctx):
         if ctx.guild.id in queues and len(queues[ctx.guild.id]) > 0:
@@ -149,14 +211,14 @@ class MusicBot(commands.Cog):
             description="Here are all the commands you can use:",
             color=discord.Color.blue()
         )
-        embed.add_field(name="!play <song>", value="Play a song from YouTube", inline=False)
+        embed.add_field(name="!play <song/url>", value="Play from YouTube or Spotify", inline=False)
         embed.add_field(name="!pause", value="Pause the current song", inline=False)
         embed.add_field(name="!resume", value="Resume playback", inline=False)
         embed.add_field(name="!skip", value="Skip to the next song", inline=False)
         embed.add_field(name="!queue", value="Show the current queue", inline=False)
         embed.add_field(name="!stop", value="Stop playing and clear queue", inline=False)
         embed.add_field(name="!leave", value="Disconnect from voice channel", inline=False)
-        embed.set_footer(text="Join a voice channel and use !play <song name> to get started!")
+        embed.set_footer(text="Now supports Spotify links! 🎵")
         await ctx.send(embed=embed)
 
 @bot.event
