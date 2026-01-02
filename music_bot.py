@@ -18,10 +18,15 @@ intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET
-))
+try:
+    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET
+    ))
+    print("✓ Spotify API connected successfully")
+except Exception as e:
+    print(f"✗ Spotify API connection failed: {e}")
+    sp = None
 
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -56,27 +61,44 @@ class MusicBot(commands.Cog):
         return any(re.match(pattern, url) for pattern in spotify_patterns)
 
     async def get_spotify_track(self, url):
+        if sp is None:
+            print("Spotify client not initialized")
+            return None
+            
         try:
             if 'track' in url:
+                print(f"Fetching Spotify track: {url}")
                 track = sp.track(url)
-                return [f"{track['artists'][0]['name']} {track['name']}"]
+                result = [f"{track['artists'][0]['name']} {track['name']}"]
+                print(f"Found track: {result[0]}")
+                return result
             elif 'playlist' in url:
+                print(f"Fetching Spotify playlist: {url}")
                 playlist = sp.playlist(url)
                 tracks = []
                 for item in playlist['tracks']['items']:
                     track = item['track']
                     if track and track.get('name') and track.get('artists'):
-                        tracks.append(f"{track['artists'][0]['name']} {track['name']}")
-                return tracks
+                        track_name = f"{track['artists'][0]['name']} {track['name']}"
+                        tracks.append(track_name)
+                        print(f"Added: {track_name}")
+                print(f"Total tracks found: {len(tracks)}")
+                return tracks if tracks else None
             elif 'album' in url:
+                print(f"Fetching Spotify album: {url}")
                 album = sp.album(url)
                 tracks = []
                 for track in album['tracks']['items']:
                     if track.get('name') and track.get('artists'):
-                        tracks.append(f"{track['artists'][0]['name']} {track['name']}")
-                return tracks
+                        track_name = f"{track['artists'][0]['name']} {track['name']}"
+                        tracks.append(track_name)
+                        print(f"Added: {track_name}")
+                print(f"Total tracks found: {len(tracks)}")
+                return tracks if tracks else None
         except Exception as e:
-            print(f"Spotify error: {e}")
+            print(f"Spotify error details: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     @commands.command(name='play', help='Plays a song from YouTube or Spotify')
@@ -97,12 +119,19 @@ class MusicBot(commands.Cog):
         async with ctx.typing():
             try:
                 if self.is_spotify_url(search):
+                    if sp is None:
+                        await ctx.send("❌ Spotify API is not configured. Please check your credentials in the .env file.")
+                        return
+                        
                     await ctx.send("🎵 Fetching from Spotify...")
+                    print(f"Processing Spotify URL: {search}")
                     spotify_tracks = await self.get_spotify_track(search)
                     
                     if not spotify_tracks:
-                        await ctx.send("Couldn't fetch from Spotify!")
+                        await ctx.send("❌ Couldn't fetch from Spotify! Check console for details.")
                         return
+                    
+                    print(f"Got {len(spotify_tracks)} tracks from Spotify")
                     
                     if len(spotify_tracks) > 1:
                         await ctx.send(f"Adding **{len(spotify_tracks)}** songs from Spotify to queue... This may take a moment.")
@@ -110,7 +139,8 @@ class MusicBot(commands.Cog):
                     added_count = 0
                     failed_count = 0
                     
-                    for track_search in spotify_tracks:
+                    for i, track_search in enumerate(spotify_tracks):
+                        print(f"Processing track {i+1}/{len(spotify_tracks)}: {track_search}")
                         success = await self.add_to_queue(ctx, track_search, voice_client, silent=True)
                         if success:
                             added_count += 1
@@ -123,33 +153,59 @@ class MusicBot(commands.Cog):
                             result_msg += f" ({failed_count} songs couldn't be found)"
                         await ctx.send(result_msg)
                 else:
+                    print(f"Processing YouTube search: {search}")
                     await self.add_to_queue(ctx, search, voice_client)
                         
             except Exception as e:
-                await ctx.send(f"An error occurred: {str(e)}")
-                print(f"Error in play command: {e}")
+                error_msg = f"An error occurred: {str(e)}"
+                await ctx.send(error_msg)
+                print(f"Error in play command: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
 
     async def add_to_queue(self, ctx, search, voice_client, silent=False):
         try:
             loop = asyncio.get_event_loop()
             with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+                print(f"Searching YouTube for: {search}")
                 info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch:{search}", download=False))
                 
-                if not info or 'entries' not in info or len(info['entries']) == 0:
+                if not info:
+                    print(f"No info returned for: {search}")
                     if not silent:
                         await ctx.send(f"Couldn't find: **{search}**")
-                    print(f"No results found for: {search}")
+                    return False
+                    
+                if 'entries' not in info:
+                    print(f"No entries in info for: {search}")
+                    if not silent:
+                        await ctx.send(f"Couldn't find: **{search}**")
+                    return False
+                    
+                if len(info['entries']) == 0:
+                    print(f"Empty entries list for: {search}")
+                    if not silent:
+                        await ctx.send(f"Couldn't find: **{search}**")
                     return False
                 
                 info = info['entries'][0]
                 
                 if not info:
+                    print(f"First entry is None for: {search}")
                     if not silent:
                         await ctx.send(f"Couldn't find: **{search}**")
                     return False
                 
-                url = info['url']
-                title = info['title']
+                url = info.get('url')
+                title = info.get('title', 'Unknown Title')
+                
+                if not url:
+                    print(f"No URL in info for: {search}")
+                    if not silent:
+                        await ctx.send(f"Couldn't get stream URL for: **{search}**")
+                    return False
+                
+                print(f"Successfully found: {title}")
                 
                 if ctx.guild.id not in queues:
                     queues[ctx.guild.id] = []
@@ -165,7 +221,10 @@ class MusicBot(commands.Cog):
                 return True
                 
         except Exception as e:
-            print(f"Error adding to queue: {e} - Search: {search}")
+            print(f"Error adding to queue: {type(e).__name__}: {e}")
+            print(f"Search was: {search}")
+            import traceback
+            traceback.print_exc()
             if not silent:
                 await ctx.send(f"Error adding song: {search}")
             return False
